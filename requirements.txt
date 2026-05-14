@@ -1,0 +1,8 @@
+pyTelegramBotAPI
+python-chess
+PyGithub
+flask
+urllib3<2
+requests
+certifi
+
