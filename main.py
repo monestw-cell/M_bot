@@ -101,14 +101,21 @@ def log_error(chat_id, error_msg):
     logger.error(entry)
 
 def get_estimated_elo(acc):
-    if acc >= 98: return 2800 + int((acc - 98) * 40)
-    if acc >= 90: return 2000 + int((acc - 90) * 80)
-    if acc >= 75: return 1400 + int((acc - 75) * 40)
-    return max(100, round(acc * 12))
+    """تقدير ELO بناءً على الدقة - مدرّج ليتناسب مع Chess.com"""
+    if acc >= 99:  return 2800
+    if acc >= 95:  return 2200 + int((acc - 95) * 120)
+    if acc >= 90:  return 1800 + int((acc - 90) * 80)
+    if acc >= 80:  return 1300 + int((acc - 80) * 50)
+    if acc >= 70:  return 900  + int((acc - 70) * 40)
+    if acc >= 55:  return 500  + int((acc - 55) * 26)
+    return max(100, int(acc * 7))
 
 def calculate_accuracy(loss_list):
+    """معادلة Chess.com المعكوسة: 103.1668 * exp(-0.04354 * sqrt(avg_loss)) - 3.1668"""
     if not loss_list: return 100.0
-    return round(100 * math.exp(-0.0035 * (sum(loss_list)/len(loss_list))), 1)
+    avg_loss = sum(loss_list) / len(loss_list)
+    acc = 103.1668 * math.exp(-0.04354 * math.sqrt(avg_loss)) - 3.1668
+    return round(max(0.0, min(100.0, acc)), 1)
 
 def generate_eval_graph(game, engine):
     if not MATPLOTLIB_AVAILABLE: return None
@@ -684,9 +691,12 @@ def process_chess(message, pgn_data):
         msg_wait = bot.reply_to(message, f"جاري مراجعة: {white} vs {black}...")
         board = game.board()
         w_losses, b_losses, moments = [], [], []
+        ply = 0  # عداد نصف النقلات
         with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
             graph_buf = generate_eval_graph(game, engine)
             for move in game.mainline_moves():
+                ply += 1
+                move_number = (ply + 1) // 2  # رقم النقلة الكاملة
                 is_white = (board.turn == chess.WHITE)
                 player   = white if is_white else black
                 icon     = "⚪" if is_white else "⚫"
@@ -712,11 +722,11 @@ def process_chess(message, pgn_data):
                 if is_white: w_losses.append(loss)
                 else:        b_losses.append(loss)
                 if is_brilliant:
-                    moments.append(f"{icon} **{player}** | Brilliant!!\n لعب: `{move_san}`")
+                    moments.append(f"{icon} نقلة {move_number} | **{player}** | ✨ Brilliant!!\n└ لعب: `{move_san}`")
                 elif loss > 400:
-                    moments.append(f"{icon} **{player}** | Blunder ??\n لعب: `{move_san}`\n البديل: `{best_san}`")
+                    moments.append(f"{icon} نقلة {move_number} | **{player}** | ❌ Blunder ??\n└ لعب: `{move_san}`\n└ الأفضل: `{best_san}`")
                 elif loss > 200:
-                    moments.append(f"{icon} **{player}** | Mistake ?\n لعب: `{move_san}`\n البديل: `{best_san}`")
+                    moments.append(f"{icon} نقلة {move_number} | **{player}** | ⚠️ Mistake ?\n└ لعب: `{move_san}`\n└ الأفضل: `{best_san}`")
         w_acc = calculate_accuracy(w_losses)
         b_acc = calculate_accuracy(b_losses)
         res = (
