@@ -8,6 +8,7 @@ import chess.engine
 import chess.pgn
 import math
 import zipfile
+import base64
 import requests
 from github import Github
 from flask import Flask
@@ -306,7 +307,7 @@ def list_workflows(call):
         back_cb = f"select_repo_{hash(repo_name) % 10000}"
         markup.add(types.InlineKeyboardButton("رجوع للمشروع", callback_data=back_cb))
         markup.add(types.InlineKeyboardButton("الرئيسية", callback_data="main_menu"))
-        text = (f"**Workflows في `{repo_name}`:**\naضغط لتشغيل:"
+        text = (f"**Workflows في `{repo_name}`:**\nاضغط لتشغيل:"
                 if workflows else f"لا يوجد Workflows في `{repo_name}`.")
         bot.edit_message_text(text, chat_id, call.message.message_id,
                               parse_mode="Markdown", reply_markup=markup)
@@ -380,7 +381,7 @@ def execute_delete(call):
         log_error(call.message.chat.id, e)
         bot.edit_message_text(f"فشل: {clean_txt(e)}", call.message.chat.id, call.message.message_id)
 
-# --- رفع ZIP ---
+# --- رفع ZIP (النسخة المطورة: Commit واحد) ---
 @bot.callback_query_handler(func=lambda c: c.data in ["cmd_update_repo", "create_new_repo"])
 def ask_for_zip(call):
     bot.answer_callback_query(call.id)
@@ -402,7 +403,7 @@ def ask_for_zip(call):
         markup = types.InlineKeyboardMarkup().add(
             types.InlineKeyboardButton("الغاء", callback_data="main_menu"))
         msg = bot.edit_message_text(
-            f"**تحديث `{repo_name}`**\narسل ملف ZIP الان:",
+            f"**تحديث `{repo_name}`**\nارسل ملف ZIP الان:",
             chat_id, call.message.message_id,
             parse_mode="Markdown", reply_markup=markup)
         user_steps[chat_id]['waiting_zip_msg'] = msg.message_id
@@ -415,7 +416,7 @@ def zip_mode_create(call):
     user_steps[chat_id]['mode'] = 'create'
     markup = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton("الغاء", callback_data="main_menu"))
-    msg = bot.edit_message_text("**انشاء من ZIP**\narسل ملف ZIP الان:",
+    msg = bot.edit_message_text("**انشاء من ZIP**\nارسل ملف ZIP الان:",
                                 chat_id, call.message.message_id,
                                 parse_mode="Markdown", reply_markup=markup)
     user_steps[chat_id]['waiting_zip_msg'] = msg.message_id
@@ -490,7 +491,7 @@ def handle_zip(message):
             return
         try:
             repo = Github(config['token']).get_repo(f"{config['username']}/{repo_name}")
-            bot.edit_message_text("جاري فك الضغط والرفع...", chat_id, pmsg.message_id)
+            bot.edit_message_text("جاري الرفع...", chat_id, pmsg.message_id)
             extract_and_upload(repo, zip_bytes, chat_id, pmsg.message_id)
         except Exception as e:
             log_error(chat_id, e)
@@ -533,12 +534,11 @@ def finalize_create_repo(message):
         user_steps[chat_id].pop('file', None)
 
 def extract_and_upload(repo, zip_bytes, chat_id, progress_msg_id=None):
-    uploaded = skipped = failed = 0
-    errors = []
     def upd(text):
         if progress_msg_id:
             try: bot.edit_message_text(text, chat_id, progress_msg_id)
             except: pass
+
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
             files = [f for f in z.infolist()
@@ -546,67 +546,90 @@ def extract_and_upload(repo, zip_bytes, chat_id, progress_msg_id=None):
                      and not f.filename.startswith('__MACOSX')
                      and '/.DS_Store' not in f.filename]
             total = len(files)
-            upd(f"تم اكتشاف {total} ملف، جاري الرفع...")
-            # كشف المجلد الجذر المشترك
+            if total == 0:
+                upd("الملف المضغوط فارغ من الملفات الصالحة!")
+                return
+            upd(f"تم اكتشاف {total} ملف، جاري الرفع في Commit واحد...")
+
+            # الحصول على الشجرة الحالية والمرجع الأساسي
+            try:
+                branch = repo.get_branch(repo.default_branch)
+                base_commit = repo.get_git_commit(branch.commit.sha)
+                base_tree = base_commit.tree.sha
+            except Exception:
+                base_tree = None
+                base_commit = None
+
+            # كشف المجلد الجذري المشترك
             top_dirs = set()
             for fi in files:
                 parts = fi.filename.split('/')
                 if len(parts) > 1:
                     top_dirs.add(parts[0])
             strip_prefix = (list(top_dirs)[0] + '/') if len(top_dirs) == 1 else ''
-            for i, fi in enumerate(files, 1):
-                if i % 5 == 0 or i == total:
-                    upd(f"الرفع: {i}/{total}\n تم: {uploaded} | فشل: {failed}")
+
+            # إعداد عناصر الشجرة الجديدة
+            tree_elements = []
+            skipped = 0
+            for fi in files:
                 raw_path = fi.filename
                 clean_path = raw_path[len(strip_prefix):] if strip_prefix and raw_path.startswith(strip_prefix) else raw_path
                 if not clean_path:
                     skipped += 1
                     continue
-                try:
-                    content = z.read(fi.filename)
-                    try:
-                        repo.create_file(clean_path, f"Add {clean_path}", content)
-                        uploaded += 1
-                    except Exception as ce:
-                        if "422" in str(ce) or "sha" in str(ce).lower():
-                            try:
-                                existing = repo.get_contents(clean_path)
-                                if isinstance(existing, list): existing = existing[0]
-                                repo.update_file(existing.path, f"Update {clean_path}", content, existing.sha)
-                                uploaded += 1
-                            except Exception as ue:
-                                failed += 1
-                                errors.append(f"`{clean_path}`: {clean_txt(str(ue)[:50])}")
-                        else:
-                            failed += 1
-                            errors.append(f"`{clean_path}`: {clean_txt(str(ce)[:50])}")
-                except:
-                    failed += 1
+                content = z.read(fi.filename)
+                encoded_content = base64.b64encode(content).decode('ascii')
+                tree_elements.append(types.InputGitTreeElement(
+                    path=clean_path,
+                    mode='100644',
+                    type='blob',
+                    content=encoded_content
+                ))
+
+            if not tree_elements:
+                upd("لم يتم العثور على ملفات صالحة بعد المعالجة!")
+                return
+
+            # إنشاء شجرة Git جديدة (مع الدمج مع الشجرة السابقة إن وجدت)
+            new_tree = repo.create_git_tree(tree_elements, base_tree=base_tree)
+
+            # إنشاء commit واحد
+            parents = [base_commit] if base_commit else []
+            commit_message = f"رفع {total} ملف دفعة واحدة (ZIP)"
+            new_commit = repo.create_git_commit(
+                message=commit_message,
+                tree=new_tree,
+                parents=parents
+            )
+
+            # تحديث المرجع الرئيسي ليشير إلى الـ commit الجديد
+            ref_name = f"heads/{repo.default_branch}"
+            git_ref = repo.get_git_ref(ref_name)
+            git_ref.edit(sha=new_commit.sha, force=False)
+
+            # النجاح
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("فتح المستودع", url=repo.html_url),
+                types.InlineKeyboardButton("الرئيسية", callback_data="main_menu")
+            )
+            result = (
+                f"✅ تم الرفع في Commit واحد!\n\n"
+                f"عدد الملفات: {total} | تم رفعها: {len(tree_elements)} | تخطي: {skipped}\n"
+                f"الرابط: {repo.html_url}"
+            )
+            upd(result)
+            # إرسال زرين مع النتيجة إذا تم التعديل بنجاح
+            try:
+                bot.edit_message_reply_markup(chat_id, progress_msg_id, reply_markup=markup)
+            except:
+                pass
+
     except zipfile.BadZipFile:
-        upd("الملف المرسل ليس ZIP صالحا!")
-        return
+        upd("الملف المرسل ليس ZIP صالحًا!")
     except Exception as e:
         log_error(chat_id, e)
-        upd(f"خطا: `{clean_txt(e)}`")
-        return
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("فتح المستودع", url=repo.html_url),
-        types.InlineKeyboardButton("الرئيسية", callback_data="main_menu")
-    )
-    result = (
-        f"{'تم الرفع بنجاح!' if failed==0 else 'اكتمل مع بعض الاخطاء'}\n\n"
-        f"المجموع: {total} | تم: {uploaded} | فشل: {failed}\n"
-        f"الرابط: {repo.html_url}"
-    )
-    if errors:
-        result += "\n\nملفات فاشلة:\n" + "\n".join(errors[:5])
-    if progress_msg_id:
-        try:
-            bot.edit_message_text(result, chat_id, progress_msg_id, reply_markup=markup)
-            return
-        except: pass
-    bot.send_message(chat_id, result, reply_markup=markup)
+        upd(f"خطأ أثناء الرفع: `{clean_txt(str(e))}`")
 
 # --- الاعداد ---
 @bot.callback_query_handler(func=lambda c: c.data == "setup_now")
@@ -691,12 +714,12 @@ def process_chess(message, pgn_data):
         msg_wait = bot.reply_to(message, f"جاري مراجعة: {white} vs {black}...")
         board = game.board()
         w_losses, b_losses, moments = [], [], []
-        ply = 0  # عداد نصف النقلات
+        ply = 0
         with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
             graph_buf = generate_eval_graph(game, engine)
             for move in game.mainline_moves():
                 ply += 1
-                move_number = (ply + 1) // 2  # رقم النقلة الكاملة
+                move_number = (ply + 1) // 2
                 is_white = (board.turn == chess.WHITE)
                 player   = white if is_white else black
                 icon     = "⚪" if is_white else "⚫"
