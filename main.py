@@ -10,7 +10,7 @@ import math
 import zipfile
 import base64
 import requests
-from github import Github
+from github import Github, InputGitTreeElement
 from flask import Flask
 from threading import Thread
 from datetime import datetime
@@ -102,7 +102,6 @@ def log_error(chat_id, error_msg):
     logger.error(entry)
 
 def get_estimated_elo(acc):
-    """تقدير ELO بناءً على الدقة - مدرّج ليتناسب مع Chess.com"""
     if acc >= 99:  return 2800
     if acc >= 95:  return 2200 + int((acc - 95) * 120)
     if acc >= 90:  return 1800 + int((acc - 90) * 80)
@@ -112,7 +111,6 @@ def get_estimated_elo(acc):
     return max(100, int(acc * 7))
 
 def calculate_accuracy(loss_list):
-    """معادلة Chess.com المعكوسة: 103.1668 * exp(-0.04354 * sqrt(avg_loss)) - 3.1668"""
     if not loss_list: return 100.0
     avg_loss = sum(loss_list) / len(loss_list)
     acc = 103.1668 * math.exp(-0.04354 * math.sqrt(avg_loss)) - 3.1668
@@ -381,7 +379,7 @@ def execute_delete(call):
         log_error(call.message.chat.id, e)
         bot.edit_message_text(f"فشل: {clean_txt(e)}", call.message.chat.id, call.message.message_id)
 
-# --- رفع ZIP (النسخة المطورة: Commit واحد) ---
+# --- رفع ZIP (Commit واحد) ---
 @bot.callback_query_handler(func=lambda c: c.data in ["cmd_update_repo", "create_new_repo"])
 def ask_for_zip(call):
     bot.answer_callback_query(call.id)
@@ -579,7 +577,8 @@ def extract_and_upload(repo, zip_bytes, chat_id, progress_msg_id=None):
                     continue
                 content = z.read(fi.filename)
                 encoded_content = base64.b64encode(content).decode('ascii')
-                tree_elements.append(types.InputGitTreeElement(
+                # التصحيح هنا: استخدام InputGitTreeElement مباشرة
+                tree_elements.append(InputGitTreeElement(
                     path=clean_path,
                     mode='100644',
                     type='blob',
@@ -619,7 +618,6 @@ def extract_and_upload(repo, zip_bytes, chat_id, progress_msg_id=None):
                 f"الرابط: {repo.html_url}"
             )
             upd(result)
-            # إرسال زرين مع النتيجة إذا تم التعديل بنجاح
             try:
                 bot.edit_message_reply_markup(chat_id, progress_msg_id, reply_markup=markup)
             except:
